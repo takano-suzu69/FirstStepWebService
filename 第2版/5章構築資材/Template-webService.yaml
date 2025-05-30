@@ -1,0 +1,532 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'CloudFormation template for a serverless web application with S3, CloudFront, API Gateway, Lambda, DynamoDB, and Cognito'
+
+Resources:
+  # S3バケット（フロントエンド）
+  FrontendBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: 's3-test-accesspoint'
+      AccessControl: Private
+      WebsiteConfiguration:
+        IndexDocument: index.html
+        ErrorDocument: error.html
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders: ['*']
+            AllowedMethods: [GET]
+            AllowedOrigins: ['*']
+            MaxAge: 3000
+
+  # S3バケットポリシー（CloudFrontからのアクセスのみ許可）
+  FrontendBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref FrontendBucket
+      PolicyDocument:
+        Statement:
+          - Action: s3:GetObject
+            Effect: Allow
+            Resource: !Sub ${FrontendBucket.Arn}/*
+            Principal:
+              CanonicalUser: !GetAtt CloudFrontOriginAccessIdentity.S3CanonicalUserId
+
+  # CloudFront Origin Access Identity
+  CloudFrontOriginAccessIdentity:
+    Type: AWS::CloudFront::CloudFrontOriginAccessIdentity
+    Properties:
+      CloudFrontOriginAccessIdentityConfig:
+        Comment: !Sub 'OAI for ${AWS::StackName}'
+
+  # CloudFrontディストリビューション
+  CloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Origins:
+          - DomainName: !GetAtt FrontendBucket.RegionalDomainName
+            Id: S3Origin
+            S3OriginConfig:
+              OriginAccessIdentity: !Sub 'origin-access-identity/cloudfront/${CloudFrontOriginAccessIdentity}'
+          - DomainName: !Sub '${ApiGateway}.execute-api.${AWS::Region}.amazonaws.com'
+            Id: ApiGatewayOrigin
+            OriginPath: /prod
+            CustomOriginConfig:
+              HTTPPort: 80
+              HTTPSPort: 443
+              OriginProtocolPolicy: https-only
+        Enabled: true
+        DefaultRootObject: index.html
+        DefaultCacheBehavior:
+          AllowedMethods: [GET, HEAD, OPTIONS]
+          TargetOriginId: S3Origin
+          ForwardedValues:
+            QueryString: false
+            Cookies:
+              Forward: none
+          ViewerProtocolPolicy: redirect-to-https
+        CacheBehaviors:
+          - PathPattern: /api/*
+            TargetOriginId: ApiGatewayOrigin
+            AllowedMethods: [DELETE, GET, HEAD, OPTIONS, PATCH, POST, PUT]
+            ForwardedValues:
+              QueryString: true
+              Headers: [Authorization]
+              Cookies:
+                Forward: all
+            ViewerProtocolPolicy: https-only
+        PriceClass: PriceClass_100
+        ViewerCertificate:
+          CloudFrontDefaultCertificate: true
+
+  # Cognito User Pool
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub ${AWS::StackName}-UserPool
+      AutoVerifiedAttributes:
+        - email
+      UsernameAttributes:
+        - email
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: false
+          RequireUppercase: true
+
+  # Cognito User Pool Client
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: !Sub ${AWS::StackName}-UserPoolClient
+      UserPoolId: !Ref UserPool
+      GenerateSecret: false
+      ExplicitAuthFlows:
+        - ALLOW_USER_SRP_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+      PreventUserExistenceErrors: ENABLED
+
+  # DynamoDB Table
+  TaskTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub ${AWS::StackName}-Tasks
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+        - AttributeName: userId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: UserIdIndex
+          KeySchema:
+            - AttributeName: userId
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+
+  # Lambda実行ロール
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DynamoDBAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource: !GetAtt TaskTable.Arn
+
+  # Lambda関数（バックエンド）
+  BackendFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-BackendFunction
+      Runtime: nodejs18.x
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        ZipFile: |
+          const AWS = require('aws-sdk');
+          const docClient = new AWS.DynamoDB.DocumentClient();
+          const tableName = process.env.TABLE_NAME;
+          
+          exports.handler = async (event) => {
+            console.log('Event:', JSON.stringify(event, null, 2));
+            
+            const { httpMethod, path, body, requestContext } = event;
+            const userId = requestContext.authorizer?.claims?.sub || 'anonymous';
+            
+            try {
+              // API エンドポイントのルーティング
+              if (path === '/api/tasks' && httpMethod === 'GET') {
+                return await getTasks(userId);
+              } else if (path === '/api/tasks' && httpMethod === 'POST') {
+                return await createTask(JSON.parse(body), userId);
+              } else if (path.startsWith('/api/tasks/') && httpMethod === 'GET') {
+                const taskId = path.split('/').pop();
+                return await getTask(taskId, userId);
+              } else if (path.startsWith('/api/tasks/') && httpMethod === 'PUT') {
+                const taskId = path.split('/').pop();
+                return await updateTask(taskId, JSON.parse(body), userId);
+              } else if (path.startsWith('/api/tasks/') && httpMethod === 'DELETE') {
+                const taskId = path.split('/').pop();
+                return await deleteTask(taskId, userId);
+              }
+              
+              return {
+                statusCode: 404,
+                headers: {
+                  'Content-Type': 'application/json',
+                  'Access-Control-Allow-Origin': '*'
+                },
+                body: JSON.stringify({ message: 'Not Found' })
+              };
+            } catch (error) {
+              console.error('Error:', error);
+              return {
+                statusCode: 500,
+                headers: {
+                  'Content-Type': 'application/json',
+                  'Access-Control-Allow-Origin': '*'
+                },
+                body: JSON.stringify({ message: 'Internal Server Error' })
+              };
+            }
+          };
+          
+          async function getTasks(userId) {
+            const params = {
+              TableName: tableName,
+              IndexName: 'UserIdIndex',
+              KeyConditionExpression: 'userId = :userId',
+              ExpressionAttributeValues: {
+                ':userId': userId
+              }
+            };
+            
+            const result = await docClient.query(params).promise();
+            
+            return {
+              statusCode: 200,
+              headers: {
+                'Content-Type': 'application/json',
+                'Access-Control-Allow-Origin': '*'
+              },
+              body: JSON.stringify(result.Items)
+            };
+          }
+          
+          async function getTask(taskId, userId) {
+            const params = {
+              TableName: tableName,
+              Key: { id: taskId }
+            };
+            
+            const result = await docClient.get(params).promise();
+            
+            if (!result.Item || result.Item.userId !== userId) {
+              return {
+                statusCode: 404,
+                headers: {
+                  'Content-Type': 'application/json',
+                  'Access-Control-Allow-Origin': '*'
+                },
+                body: JSON.stringify({ message: 'Task not found' })
+              };
+            }
+            
+            return {
+              statusCode: 200,
+              headers: {
+                'Content-Type': 'application/json',
+                'Access-Control-Allow-Origin': '*'
+              },
+              body: JSON.stringify(result.Item)
+            };
+          }
+          
+          async function createTask(task, userId) {
+            const taskId = Date.now().toString();
+            const params = {
+              TableName: tableName,
+              Item: {
+                id: taskId,
+                userId: userId,
+                title: task.title,
+                description: task.description,
+                status: task.status || 'pending',
+                createdAt: new Date().toISOString()
+              }
+            };
+            
+            await docClient.put(params).promise();
+            
+            return {
+              statusCode: 201,
+              headers: {
+                'Content-Type': 'application/json',
+                'Access-Control-Allow-Origin': '*'
+              },
+              body: JSON.stringify(params.Item)
+            };
+          }
+          
+          async function updateTask(taskId, task, userId) {
+            // 最初にタスクが存在し、ユーザーのものであることを確認
+            const getParams = {
+              TableName: tableName,
+              Key: { id: taskId }
+            };
+            
+            const existingTask = await docClient.get(getParams).promise();
+            
+            if (!existingTask.Item || existingTask.Item.userId !== userId) {
+              return {
+                statusCode: 404,
+                headers: {
+                  'Content-Type': 'application/json',
+                  'Access-Control-Allow-Origin': '*'
+                },
+                body: JSON.stringify({ message: 'Task not found' })
+              };
+            }
+            
+            const params = {
+              TableName: tableName,
+              Key: { id: taskId },
+              UpdateExpression: 'set title = :title, description = :description, status = :status, updatedAt = :updatedAt',
+              ExpressionAttributeValues: {
+                ':title': task.title,
+                ':description': task.description,
+                ':status': task.status,
+                ':updatedAt': new Date().toISOString()
+              },
+              ReturnValues: 'ALL_NEW'
+            };
+            
+            const result = await docClient.update(params).promise();
+            
+            return {
+              statusCode: 200,
+              headers: {
+                'Content-Type': 'application/json',
+                'Access-Control-Allow-Origin': '*'
+              },
+              body: JSON.stringify(result.Attributes)
+            };
+          }
+          
+          async function deleteTask(taskId, userId) {
+            // 最初にタスクが存在し、ユーザーのものであることを確認
+            const getParams = {
+              TableName: tableName,
+              Key: { id: taskId }
+            };
+            
+            const existingTask = await docClient.get(getParams).promise();
+            
+            if (!existingTask.Item || existingTask.Item.userId !== userId) {
+              return {
+                statusCode: 404,
+                headers: {
+                  'Content-Type': 'application/json',
+                  'Access-Control-Allow-Origin': '*'
+                },
+                body: JSON.stringify({ message: 'Task not found' })
+              };
+            }
+            
+            const params = {
+              TableName: tableName,
+              Key: { id: taskId }
+            };
+            
+            await docClient.delete(params).promise();
+            
+            return {
+              statusCode: 204,
+              headers: {
+                'Access-Control-Allow-Origin': '*'
+              }
+            };
+          }
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref TaskTable
+
+  # API Gateway
+  ApiGateway:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: !Sub ${AWS::StackName}-API
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+
+  # API Gateway Cognito Authorizer
+  ApiGatewayAuthorizer:
+    Type: AWS::ApiGateway::Authorizer
+    Properties:
+      Name: CognitoAuthorizer
+      RestApiId: !Ref ApiGateway
+      Type: COGNITO_USER_POOLS
+      IdentitySource: method.request.header.Authorization
+      ProviderARNs:
+        - !GetAtt UserPool.Arn
+
+  # API Gateway Resource
+  ApiResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ParentId: !GetAtt ApiGateway.RootResourceId
+      PathPart: api
+
+  TasksResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ParentId: !Ref ApiResource
+      PathPart: tasks
+
+  TaskIdResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ParentId: !Ref TasksResource
+      PathPart: '{taskId}'
+
+  # API Gateway Methods
+  GetTasksMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ResourceId: !Ref TasksResource
+      HttpMethod: GET
+      AuthorizationType: COGNITO_USER_POOLS
+      AuthorizerId: !Ref ApiGatewayAuthorizer
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${BackendFunction.Arn}/invocations
+
+  CreateTaskMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ResourceId: !Ref TasksResource
+      HttpMethod: POST
+      AuthorizationType: COGNITO_USER_POOLS
+      AuthorizerId: !Ref ApiGatewayAuthorizer
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${BackendFunction.Arn}/invocations
+
+  GetTaskMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ResourceId: !Ref TaskIdResource
+      HttpMethod: GET
+      AuthorizationType: COGNITO_USER_POOLS
+      AuthorizerId: !Ref ApiGatewayAuthorizer
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${BackendFunction.Arn}/invocations
+
+  UpdateTaskMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ResourceId: !Ref TaskIdResource
+      HttpMethod: PUT
+      AuthorizationType: COGNITO_USER_POOLS
+      AuthorizerId: !Ref ApiGatewayAuthorizer
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${BackendFunction.Arn}/invocations
+
+  DeleteTaskMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ResourceId: !Ref TaskIdResource
+      HttpMethod: DELETE
+      AuthorizationType: COGNITO_USER_POOLS
+      AuthorizerId: !Ref ApiGatewayAuthorizer
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${BackendFunction.Arn}/invocations
+
+  # API Gateway Deployment
+  ApiDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn:
+      - GetTasksMethod
+      - CreateTaskMethod
+      - GetTaskMethod
+      - UpdateTaskMethod
+      - DeleteTaskMethod
+    Properties:
+      RestApiId: !Ref ApiGateway
+      StageName: prod
+
+  # Lambda Permission for API Gateway
+  LambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref BackendFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*
+
+Outputs:
+  CloudFrontURL:
+    Description: URL of the CloudFront distribution
+    Value: !Sub https://${CloudFrontDistribution.DomainName}
+  
+  S3BucketName:
+    Description: Name of the S3 bucket hosting the frontend
+    Value: !Ref FrontendBucket
+  
+  ApiGatewayURL:
+    Description: URL of the API Gateway
+    Value: !Sub https://${ApiGateway}.execute-api.${AWS::Region}.amazonaws.com/prod
+  
+  UserPoolId:
+    Description: ID of the Cognito User Pool
+    Value: !Ref UserPool
+  
+  UserPoolClientId:
+    Description: ID of the Cognito User Pool Client
+    Value: !Ref UserPoolClient
+  
+  DynamoDBTableName:
+    Description: Name of the DynamoDB table
+    Value: !Ref TaskTable

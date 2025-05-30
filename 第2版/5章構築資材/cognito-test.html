@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Cognito Test</title>
+</head>
+<body>
+  <h1>Cognito認証テスト</h1>
+  
+  <div>
+    <h2>設定情報</h2>
+    <pre id="config-info"></pre>
+  </div>
+  
+  <div>
+    <h2>ユーザー登録</h2>
+    <input type="email" id="signup-email" placeholder="メールアドレス">
+    <input type="password" id="signup-password" placeholder="パスワード">
+    <button onclick="signUp()">登録</button>
+  </div>
+  
+  <div>
+    <h2>ログイン</h2>
+    <input type="email" id="login-email" placeholder="メールアドレス">
+    <input type="password" id="login-password" placeholder="パスワード">
+    <button onclick="signIn()">ログイン</button>
+  </div>
+
+<div>
+  <h2>アカウント確認</h2>
+  <input type="email" id="confirm-email" placeholder="メールアドレス">
+  <input type="text" id="confirm-code" placeholder="確認コード">
+  <button onclick="confirmAccount()">確認</button>
+</div>
+
+
+  <div>
+    <h2>結果</h2>
+    <pre id="result"></pre>
+  </div>
+  
+  <script src="https://unpkg.com/amazon-cognito-identity-js@5.2.10/dist/amazon-cognito-identity.min.js"></script>
+  <script src="config.js"></script>
+  <script>
+    // 設定情報を表示
+    document.getElementById('config-info').textContent = 
+      'UserPoolId: ' + config.cognito.userPoolId + '\n' +
+      'ClientId: ' + config.cognito.clientId + '\n' +
+      'Region: ' + config.cognito.region;
+    
+    // Cognitoの設定
+    const userPool = new AmazonCognitoIdentity.CognitoUserPool({
+      UserPoolId: config.cognito.userPoolId,
+      ClientId: config.cognito.clientId
+    });
+    
+    // サインアップ処理
+    function signUp() {
+      const email = document.getElementById('signup-email').value;
+      const password = document.getElementById('signup-password').value;
+      
+      document.getElementById('result').textContent = '登録中...';
+      
+      userPool.signUp(
+        email,
+        password,
+        [new AmazonCognitoIdentity.CognitoUserAttribute({ Name: 'email', Value: email })],
+        null,
+        (err, result) => {
+          if (err) {
+            document.getElementById('result').textContent = '登録エラー: ' + err.message;
+            return;
+          }
+          document.getElementById('result').textContent = 
+            '登録成功!\n' +
+            'ユーザー名: ' + result.user.getUsername() + '\n' +
+            '確認が必要: ' + !result.userConfirmed;
+        }
+      );
+    }
+    
+    // ログイン処理
+    function signIn() {
+      const email = document.getElementById('login-email').value;
+      const password = document.getElementById('login-password').value;
+      
+      document.getElementById('result').textContent = 'ログイン中...';
+      
+      const authData = {
+        Username: email,
+        Password: password
+      };
+      
+      const authDetails = new AmazonCognitoIdentity.AuthenticationDetails(authData);
+      
+      const userData = {
+        Username: email,
+        Pool: userPool
+      };
+      
+      const cognitoUser = new AmazonCognitoIdentity.CognitoUser(userData);
+      
+      cognitoUser.authenticateUser(authDetails, {
+        onSuccess: (result) => {
+          document.getElementById('result').textContent = 
+            'ログイン成功!\n' +
+            'アクセストークン: ' + result.getAccessToken().getJwtToken().substring(0, 20) + '...';
+        },
+        onFailure: (err) => {
+          document.getElementById('result').textContent = 'ログインエラー: ' + err.message;
+        }
+      });
+    }
+
+// 既存のスクリプトに以下の関数を追加
+function confirmAccount() {
+  const email = document.getElementById('confirm-email').value;
+  const code = document.getElementById('confirm-code').value;
+  
+  document.getElementById('result').textContent = '確認中...';
+  
+  const userData = {
+    Username: email,
+    Pool: userPool
+  };
+  
+  const cognitoUser = new AmazonCognitoIdentity.CognitoUser(userData);
+  
+  cognitoUser.confirmRegistration(code, true, (err, result) => {
+    if (err) {
+      document.getElementById('result').textContent = '確認エラー: ' + err.message;
+      return;
+    }
+    document.getElementById('result').textContent = '確認成功! 結果: ' + result;
+  });
+}
+  </script>
+</body>
+</html>
