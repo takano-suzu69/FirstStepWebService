@@ -24,8 +24,15 @@
 ## 第2版
 
 ・5章構築資材
+　- api.js
+  - app.js
+  - auth.js 
+  - config.js # 置換場所あり
+  - index.html
+  - styles.css
+
 ・セキュリティ対応用資材(準備中)
-・セキュリティ対応版(準備中)
+
 
 ## 正誤表
 
