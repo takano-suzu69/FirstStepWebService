@@ -6,7 +6,6 @@ Resources:
   FrontendBucket:
     Type: AWS::S3::Bucket
     Properties:
-      BucketName: 's3-test-accesspoint'
       AccessControl: Private
       WebsiteConfiguration:
         IndexDocument: index.html
