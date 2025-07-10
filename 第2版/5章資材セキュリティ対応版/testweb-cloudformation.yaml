@@ -1,0 +1,1443 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Improved CloudFormation template for TESTWEB application with CloudFront, API Gateway, Lambda, S3, DynamoDB, and Cognito'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: prod
+    Description: Environment name
+    AllowedValues:
+      - dev
+      - test
+      - prod
+
+Resources:
+  # S3 Bucket for Frontend
+  FrontendBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Join 
+        - '-'
+        - - !Select [0, !Split ['-', !Ref 'AWS::StackName']]
+          - 'frontendbucket'
+          - !Ref 'AWS::AccountId'
+      WebsiteConfiguration:
+        IndexDocument: index.html
+        ErrorDocument: error.html
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-FrontendBucket"
+
+  # CloudFront Origin Access Identity
+  CloudFrontOriginAccessIdentity:
+    Type: AWS::CloudFront::CloudFrontOriginAccessIdentity
+    Properties:
+      CloudFrontOriginAccessIdentityConfig:
+        Comment: !Sub "OAI for ${AWS::StackName}"
+
+  # S3 Bucket Policy
+  FrontendBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref FrontendBucket
+      PolicyDocument:
+        Version: '2008-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::cloudfront:user/CloudFront Origin Access Identity ${CloudFrontOriginAccessIdentity}"
+            Action: 's3:GetObject'
+            Resource: !Sub "arn:aws:s3:::${FrontendBucket}/*"
+
+  # DynamoDB Table for Tasks - 改善版
+  TasksTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Join 
+        - '-'
+        - - !Select [0, !Split ['-', !Ref 'AWS::StackName']]
+          - 'tasks'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+        - AttributeName: userId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: UserIdIndex
+          KeySchema:
+            - AttributeName: userId
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-TasksTable"
+
+  # Cognito User Pool
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Join 
+        - '-'
+        - - !Select [0, !Split ['-', !Ref 'AWS::StackName']]
+          - 'userpool'
+      AutoVerifiedAttributes:
+        - email
+      UsernameAttributes:
+        - email
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireUppercase: true
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: false
+      Schema:
+        - Name: email
+          AttributeDataType: String
+          Mutable: true
+          Required: false
+      EmailVerificationMessage: |
+        こんにちは、
+
+        アカウント登録ありがとうございます。以下の検証コードを入力して、登録を完了してください。
+
+        検証コード: {####}
+
+        このコードは24時間有効です。
+
+        ご不明な点がございましたら、お問い合わせください。
+      EmailVerificationSubject: Your verification code
+      SmsVerificationMessage: |
+        こんにちは、
+
+        アカウント登録ありがとうございます。以下の検証コードを入力して、登録を完了してください。
+
+        検証コード: {####}
+
+        このコードは24時間有効です。
+
+        ご不明な点がございましたら、お問い合わせください。
+
+  # Cognito User Pool Client
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: !Join 
+        - '-'
+        - - !Select [0, !Split ['-', !Ref 'AWS::StackName']]
+          - 'userpoolclient'
+      UserPoolId: !Ref UserPool
+      ExplicitAuthFlows:
+        - ALLOW_REFRESH_TOKEN_AUTH
+        - ALLOW_USER_SRP_AUTH
+      PreventUserExistenceErrors: ENABLED
+      RefreshTokenValidity: 30
+      EnableTokenRevocation: true
+
+  # Lambda Role for Tasks API - 改善版
+  TasksAPILambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Join 
+        - '-'
+        - - !Select [0, !Split ['-', !Ref 'AWS::StackName']]
+          - 'tasksapilambdarole'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DynamoDBAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # タスク取得のための権限
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                Resource:
+                  - !GetAtt TasksTable.Arn
+
+              # ユーザー固有のタスク一覧取得のための権限
+              - Effect: Allow
+                Action:
+                  - dynamodb:Query
+                Resource:
+                  - !Sub "${TasksTable.Arn}/index/*"
+
+              # タスク作成のための権限
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                Resource:
+                  - !GetAtt TasksTable.Arn
+
+              # タスク更新のための権限
+              - Effect: Allow
+                Action:
+                  - dynamodb:UpdateItem
+                Resource:
+                  - !GetAtt TasksTable.Arn
+
+              # タスク削除のための権限
+              - Effect: Allow
+                Action:
+                  - dynamodb:DeleteItem
+                Resource:
+                  - !GetAtt TasksTable.Arn
+
+  # Lambda Function for Tasks API - 改善版
+  TasksAPIFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Join 
+        - '-'
+        - - !Select [0, !Split ['-', !Ref 'AWS::StackName']]
+          - 'tasksapifunction'
+      Handler: index.handler
+      Role: !GetAtt TasksAPILambdaRole.Arn
+      Runtime: nodejs18.x
+      Timeout: 30  # タイムアウトを30秒に増加
+      MemorySize: 256
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref TasksTable
+          VERSION: '1.0.2'  # バージョン情報を更新
+      Code:
+        ZipFile: |
+          // AWS SDKのインポート
+          const AWS = require('aws-sdk');
+          const dynamodb = new AWS.DynamoDB.DocumentClient();
+          
+          // CORS対応のヘッダー
+          const corsHeaders = {
+            'Access-Control-Allow-Origin': 'https://*.cloudfront.net',
+            'Access-Control-Allow-Headers': 'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token,X-XSRF-TOKEN',
+            'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS',
+            'Access-Control-Allow-Credentials': 'true',
+            'Content-Type': 'application/json'
+          };
+          
+          // uuidパッケージがない場合の代替関数
+          function generateUUID() {
+            return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+              const r = Math.random() * 16 | 0, v = c == 'x' ? r : (r & 0x3 | 0x8);
+              return v.toString(16);
+            });
+          }
+          
+          // HTML特殊文字をエスケープする関数（XSS対策）
+          function sanitizeHtml(str) {
+            if (!str) return '';
+            return str
+              .replace(/&/g, '&amp;')
+              .replace(/</g, '&lt;')
+              .replace(/>/g, '&gt;')
+              .replace(/"/g, '&quot;')
+              .replace(/'/g, '&#039;');
+          }
+          
+          // センシティブフィールドのリスト
+          const sensitiveFields = [
+            'password', 'token', 'accessToken', 'idToken', 'refreshToken', 
+            'authorization', 'apiKey', 'secret', 'credentials', 'key',
+            'sub', 'email', 'phone', 'address', 'birthdate', 'ssn'
+          ];
+          
+          // ログ出力のためのユーティリティ関数
+          const logger = {
+            // センシティブ情報をマスクする関数
+            maskSensitiveData: function(obj) {
+              if (!obj) return obj;
+              
+              // オブジェクトをディープコピー
+              const masked = JSON.parse(JSON.stringify(obj));
+              
+              // オブジェクトを再帰的に処理
+              const maskRecursive = (obj) => {
+                if (!obj || typeof obj !== 'object') return;
+                
+                Object.keys(obj).forEach(key => {
+                  // キーがセンシティブかチェック（大文字小文字を区別しない）
+                  const lowerKey = key.toLowerCase();
+                  const isSensitive = sensitiveFields.some(field => lowerKey.includes(field.toLowerCase()));
+                  
+                  if (isSensitive && typeof obj[key] === 'string') {
+                    // センシティブな文字列をマスク
+                    const value = obj[key];
+                    if (value.length > 6) {
+                      obj[key] = value.substring(0, 3) + '***' + value.substring(value.length - 3);
+                    } else if (value.length > 0) {
+                      obj[key] = '******';
+                    }
+                  } else if (obj[key] && typeof obj[key] === 'object') {
+                    // オブジェクトや配列を再帰的に処理
+                    maskRecursive(obj[key]);
+                  }
+                });
+              };
+              
+              maskRecursive(masked);
+              return masked;
+            },
+            
+            // 安全にログ出力する関数
+            info: function(message, data) {
+              if (data) {
+                console.log(message, this.maskSensitiveData(data));
+              } else {
+                console.log(message);
+              }
+            },
+            
+            error: function(message, error, data) {
+              if (error && error.stack) {
+                // エラースタックからセンシティブ情報を除去
+                const sanitizedStack = error.stack
+                  .split('\n')
+                  .filter(line => !sensitiveFields.some(field => line.toLowerCase().includes(field.toLowerCase())))
+                  .join('\n');
+                
+                if (data) {
+                  console.error(message, { ...this.maskSensitiveData(error), stack: sanitizedStack }, this.maskSensitiveData(data));
+                } else {
+                  console.error(message, { ...this.maskSensitiveData(error), stack: sanitizedStack });
+                }
+              } else if (data) {
+                console.error(message, this.maskSensitiveData(error), this.maskSensitiveData(data));
+              } else if (error) {
+                console.error(message, this.maskSensitiveData(error));
+              } else {
+                console.error(message);
+              }
+            }
+          };
+          
+          // エラーレスポンスを生成する共通関数
+          function createErrorResponse(statusCode, message, error = null, headers = corsHeaders) {
+            // エラーメッセージをユーザー向けに一般化
+            const publicErrorMessages = {
+              400: 'リクエストが不正です',
+              401: '認証が必要です',
+              403: 'アクセス権限がありません',
+              404: 'リソースが見つかりません',
+              409: 'リソースの競合が発生しました',
+              500: 'サーバー内部エラーが発生しました'
+            };
+            
+            // 詳細なエラー情報をログに記録（サーバーサイドのみ）
+            if (error) {
+              logger.error(`Error details for ${statusCode} response:`, error);
+            }
+            
+            // クライアントに返すエラーレスポンス（最小限の情報のみ）
+            const errorResponse = {
+              statusCode: statusCode,
+              headers: headers,
+              body: JSON.stringify({
+                status: 'error',
+                code: statusCode,
+                message: message || publicErrorMessages[statusCode] || 'エラーが発生しました'
+              })
+            };
+            
+            return errorResponse;
+          }
+          
+          // GETリクエストの処理
+          async function handleGet(event, userId) {
+            try {
+              logger.info('GET request received', { path: event.path, method: event.httpMethod });
+              
+              // 特定のタスクを取得
+              if (event.pathParameters && event.pathParameters.taskId) {
+                const taskId = event.pathParameters.taskId;
+                logger.info('Getting specific task', { taskId });
+                
+                const params = {
+                  TableName: process.env.TABLE_NAME,
+                  Key: {
+                    id: taskId
+                  }
+                };
+                
+                const result = await dynamodb.get(params).promise();
+                
+                // タスクが存在し、かつ現在のユーザーのものであることを確認
+                if (!result.Item || result.Item.userId !== userId) {
+                  logger.error('Task not found or not authorized', { taskId });
+                  return createErrorResponse(404, 'Task not found');
+                }
+                
+                logger.info('Task found', { taskId });
+                return {
+                  statusCode: 200,
+                  headers: corsHeaders,
+                  body: JSON.stringify(result.Item)
+                };
+              } 
+              // ユーザーのすべてのタスクを取得
+              else {
+                logger.info('Getting all tasks for user');
+                
+                const params = {
+                  TableName: process.env.TABLE_NAME,
+                  IndexName: 'UserIdIndex',
+                  KeyConditionExpression: 'userId = :userId',
+                  ExpressionAttributeValues: {
+                    ':userId': userId
+                  }
+                };
+                
+                const result = await dynamodb.query(params).promise();
+                logger.info('Tasks retrieved', { count: result.Items ? result.Items.length : 0 });
+                
+                return {
+                  statusCode: 200,
+                  headers: corsHeaders,
+                  body: JSON.stringify(result.Items || [])
+                };
+              }
+            } catch (error) {
+              logger.error('Error in handleGet', error);
+              return createErrorResponse(500, 'Error retrieving tasks', error);
+            }
+          }
+          
+          // POSTリクエストの処理
+          async function handlePost(event, userId) {
+            try {
+              logger.info('POST request received', { path: event.path, method: event.httpMethod });
+              
+              // リクエストボディのチェック
+              if (!event.body) {
+                logger.error('Request body is missing');
+                return createErrorResponse(400, 'Request body is missing');
+              }
+              
+              // Base64エンコードされたボディを処理
+              let bodyStr = event.body;
+              if (event.isBase64Encoded) {
+                bodyStr = Buffer.from(event.body, 'base64').toString('utf-8');
+                logger.info('Decoded base64 body length:', { length: bodyStr.length });
+              }
+              
+              // JSONパース
+              let body;
+              try {
+                body = JSON.parse(bodyStr);
+                // センシティブでない情報のみログ出力
+                logger.info('Request body parsed', { 
+                  hasTitle: !!body.title,
+                  hasDescription: !!body.description,
+                  status: body.status
+                });
+              } catch (e) {
+                logger.error('JSON parse error', e, { bodyPreview: bodyStr.substring(0, 50) });
+                return createErrorResponse(400, 'Invalid JSON in request body', e);
+              }
+              
+              // 入力検証の強化
+              // タイトルの検証 - 長さ制限と特殊文字のエスケープ
+              if (!body.title || typeof body.title !== 'string') {
+                logger.error('Title validation failed', { titleType: typeof body.title });
+                return createErrorResponse(400, 'Title is required and must be a string');
+              }
+              
+              // タイトルの長さ制限
+              if (body.title.trim().length === 0 || body.title.length > 100) {
+                logger.error('Title length validation failed', { titleLength: body.title.length });
+                return createErrorResponse(400, 'Title must be between 1 and 100 characters');
+              }
+              
+              // 説明の検証
+              if (body.description !== undefined && (typeof body.description !== 'string' || body.description.length > 1000)) {
+                logger.error('Description validation failed', { 
+                  descriptionType: typeof body.description,
+                  descriptionLength: body.description ? body.description.length : 0
+                });
+                return createErrorResponse(400, 'Description must be a string with maximum 1000 characters');
+              }
+              
+              // ステータスの検証
+              const validStatuses = ['pending', 'in-progress', 'completed'];
+              if (body.status !== undefined && !validStatuses.includes(body.status)) {
+                logger.error('Status validation failed', { providedStatus: body.status });
+                return createErrorResponse(400, 'Invalid status value');
+              }
+              
+              const taskId = generateUUID();
+              logger.info('Generated task ID', { taskId });
+              
+              // 入力値のサニタイズ
+              const sanitizedTitle = sanitizeHtml(body.title.trim());
+              const sanitizedDescription = body.description ? sanitizeHtml(body.description) : '';
+              
+              // タスクオブジェクトの作成
+              const task = {
+                id: taskId,
+                userId: userId,
+                title: sanitizedTitle,
+                description: sanitizedDescription,
+                status: body.status || 'pending',
+                createdAt: new Date().toISOString(),
+                updatedAt: new Date().toISOString()
+              };
+              
+              logger.info('Creating task', { taskId, status: task.status });
+              
+              const params = {
+                TableName: process.env.TABLE_NAME,
+                Item: task
+              };
+              
+              await dynamodb.put(params).promise();
+              logger.info('Task created successfully', { taskId });
+              
+              return {
+                statusCode: 201,
+                headers: corsHeaders,
+                body: JSON.stringify(task)
+              };
+            } catch (error) {
+              logger.error('Error in handlePost', error);
+              return createErrorResponse(500, 'Error creating task', error);
+            }
+          }
+          
+          // PUTリクエストの処理
+          async function handlePut(event, userId) {
+            try {
+              logger.info('PUT request received', { path: event.path, method: event.httpMethod });
+              
+              if (!event.pathParameters || !event.pathParameters.taskId) {
+                logger.error('Task ID is missing in path parameters');
+                return createErrorResponse(400, 'Task ID is required');
+              }
+              
+              const taskId = event.pathParameters.taskId;
+              logger.info('Updating task', { taskId });
+              
+              if (!event.body) {
+                logger.error('Request body is missing');
+                return createErrorResponse(400, 'Request body is missing');
+              }
+              
+              // Base64エンコードされたボディを処理
+              let bodyStr = event.body;
+              if (event.isBase64Encoded) {
+                bodyStr = Buffer.from(event.body, 'base64').toString('utf-8');
+                logger.info('Decoded base64 body length:', { length: bodyStr.length });
+              }
+              
+              // JSONパース
+              let body;
+              try {
+                body = JSON.parse(bodyStr);
+                // センシティブでない情報のみログ出力
+                logger.info('Request body parsed', { 
+                  hasTitle: !!body.title,
+                  hasDescription: !!body.description,
+                  status: body.status
+                });
+              } catch (e) {
+                logger.error('JSON parse error', e, { bodyPreview: bodyStr.substring(0, 50) });
+                return createErrorResponse(400, 'Invalid JSON in request body', e);
+              }
+              
+              // まず、タスクが存在し、現在のユーザーのものであることを確認
+              const getParams = {
+                TableName: process.env.TABLE_NAME,
+                Key: {
+                  id: taskId
+                }
+              };
+              
+              try {
+                logger.info('Checking if task exists', { taskId });
+                const existingTask = await dynamodb.get(getParams).promise();
+                
+                if (!existingTask.Item) {
+                  logger.error('Task not found', { taskId });
+                  return createErrorResponse(404, 'Task not found');
+                }
+                
+                if (existingTask.Item.userId !== userId) {
+                  logger.error('User not authorized to update this task', { 
+                    taskId,
+                    taskOwner: existingTask.Item.userId.substring(0, 5) + '...' // ユーザーIDの一部のみログ出力
+                  });
+                  return createErrorResponse(403, 'Not authorized to update this task');
+                }
+                
+                logger.info('Task found and authorized', { taskId });
+                
+                // 入力検証の強化
+                let updatedTitle = existingTask.Item.title;
+                let updatedDescription = existingTask.Item.description;
+                let updatedStatus = existingTask.Item.status;
+                
+                // タイトルの検証
+                if (body.title !== undefined) {
+                  if (typeof body.title !== 'string') {
+                    logger.error('Title validation failed', { titleType: typeof body.title });
+                    return createErrorResponse(400, 'Title must be a string');
+                  }
+                  
+                  if (body.title.trim().length === 0 || body.title.length > 100) {
+                    logger.error('Title length validation failed', { titleLength: body.title.length });
+                    return createErrorResponse(400, 'Title must be between 1 and 100 characters');
+                  }
+                  
+                  updatedTitle = sanitizeHtml(body.title.trim());
+                }
+                
+                // 説明の検証
+                if (body.description !== undefined) {
+                  if (typeof body.description !== 'string' || body.description.length > 1000) {
+                    logger.error('Description validation failed', { 
+                      descriptionType: typeof body.description,
+                      descriptionLength: body.description ? body.description.length : 0
+                    });
+                    return createErrorResponse(400, 'Description must be a string with maximum 1000 characters');
+                  }
+                  
+                  updatedDescription = sanitizeHtml(body.description);
+                }
+                
+                // ステータスの検証
+                const validStatuses = ['pending', 'in-progress', 'completed'];
+                if (body.status !== undefined) {
+                  if (!validStatuses.includes(body.status)) {
+                    logger.error('Status validation failed', { providedStatus: body.status });
+                    return createErrorResponse(400, 'Invalid status value');
+                  }
+                  
+                  updatedStatus = body.status;
+                }
+                
+                // タスクを更新
+                const updateParams = {
+                  TableName: process.env.TABLE_NAME,
+                  Key: {
+                    id: taskId
+                  },
+                  UpdateExpression: 'set title = :title, description = :description, #status_attr = :status, updatedAt = :updatedAt',
+                  ExpressionAttributeNames: {
+                    '#status_attr': 'status'  // 予約語をエスケープ
+                  },
+                  ExpressionAttributeValues: {
+                    ':title': updatedTitle,
+                    ':description': updatedDescription,
+                    ':status': updatedStatus,
+                    ':updatedAt': new Date().toISOString()
+                  },
+                  ReturnValues: 'ALL_NEW'
+                };
+                
+                logger.info('Updating task with params', { 
+                  taskId,
+                  status: updatedStatus,
+                  updatedAt: updateParams.ExpressionAttributeValues[':updatedAt']
+                });
+                
+                const result = await dynamodb.update(updateParams).promise();
+                logger.info('Task updated successfully', { taskId });
+                
+                return {
+                  statusCode: 200,
+                  headers: corsHeaders,
+                  body: JSON.stringify(result.Attributes)
+                };
+              } catch (dbError) {
+                logger.error('DynamoDB error in handlePut', dbError);
+                return createErrorResponse(500, 'Error updating task', dbError);
+              }
+            } catch (error) {
+              logger.error('Error in handlePut', error);
+              return createErrorResponse(500, 'Error updating task', error);
+            }
+          }
+          
+          // DELETEリクエストの処理
+          async function handleDelete(event, userId) {
+            try {
+              logger.info('DELETE request received', { path: event.path, method: event.httpMethod });
+              
+              if (!event.pathParameters || !event.pathParameters.taskId) {
+                logger.error('Task ID is missing in path parameters');
+                return createErrorResponse(400, 'Task ID is required');
+              }
+              
+              const taskId = event.pathParameters.taskId;
+              logger.info('Deleting task', { taskId });
+              
+              // まず、タスクが存在し、現在のユーザーのものであることを確認
+              const getParams = {
+                TableName: process.env.TABLE_NAME,
+                Key: {
+                  id: taskId
+                }
+              };
+              
+              try {
+                const existingTask = await dynamodb.get(getParams).promise();
+                
+                if (!existingTask.Item) {
+                  logger.error('Task not found', { taskId });
+                  return createErrorResponse(404, 'Task not found');
+                }
+                
+                if (existingTask.Item.userId !== userId) {
+                  logger.error('User not authorized to delete this task', { 
+                    taskId,
+                    taskOwner: existingTask.Item.userId.substring(0, 5) + '...' // ユーザーIDの一部のみログ出力
+                  });
+                  return createErrorResponse(403, 'Not authorized to delete this task');
+                }
+                
+                // タスクを削除
+                const deleteParams = {
+                  TableName: process.env.TABLE_NAME,
+                  Key: {
+                    id: taskId
+                  }
+                };
+                
+                await dynamodb.delete(deleteParams).promise();
+                logger.info('Task deleted successfully', { taskId });
+                
+                return {
+                  statusCode: 200,
+                  headers: corsHeaders,
+                  body: JSON.stringify({ message: 'Task deleted successfully' })
+                };
+              } catch (dbError) {
+                logger.error('DynamoDB error in handleDelete', dbError);
+                return createErrorResponse(500, 'Error deleting task', dbError);
+              }
+            } catch (error) {
+              logger.error('Error in handleDelete', error);
+              return createErrorResponse(500, 'Error deleting task', error);
+            }
+          }
+          
+          // OPTIONSリクエストの処理（CORS対応）
+          function handleOptions() {
+            logger.info('OPTIONS request received');
+            return {
+              statusCode: 200,
+              headers: corsHeaders,
+              body: JSON.stringify({})
+            };
+          }
+          
+          // Lambda関数のハンドラー
+          exports.handler = async (event) => {
+            logger.info('Event received:', event);
+            
+            try {
+              // OPTIONSリクエストの場合は即座にCORSヘッダーを返す
+              if (event.httpMethod === 'OPTIONS') {
+                return handleOptions();
+              }
+              
+              // 認証チェックの強化
+              if (!event.requestContext || !event.requestContext.authorizer || !event.requestContext.authorizer.claims) {
+                logger.error('認証情報が不足しています');
+                return createErrorResponse(401, 'Unauthorized - Missing authentication information');
+              }
+              
+              // ユーザーIDを認証情報から取得
+              const userId = event.requestContext.authorizer.claims.sub;
+              if (!userId) {
+                logger.error('ユーザーIDが見つかりません');
+                return createErrorResponse(401, 'Unauthorized - User ID not found');
+              }
+              
+              // トークンの有効期限をチェック
+              const tokenExp = event.requestContext.authorizer.claims.exp;
+              if (tokenExp) {
+                const currentTime = Math.floor(Date.now() / 1000);
+                if (currentTime > parseInt(tokenExp)) {
+                  logger.error('トークンの有効期限が切れています');
+                  return createErrorResponse(401, 'Unauthorized - Token expired');
+                }
+              }
+              
+              // トークンの発行者をチェック
+              const tokenIssuer = event.requestContext.authorizer.claims.iss;
+              if (tokenIssuer && !tokenIssuer.includes('cognito-idp')) {
+                logger.error('不正な発行者からのトークンです:', { issuer: tokenIssuer });
+                return createErrorResponse(401, 'Unauthorized - Invalid token issuer');
+              }
+              
+              logger.info('User authenticated:', { userId });
+              
+              // HTTPメソッドに応じた処理
+              switch(event.httpMethod) {
+                case 'GET':
+                  return await handleGet(event, userId);
+                case 'POST':
+                  return await handlePost(event, userId);
+                case 'PUT':
+                  return await handlePut(event, userId);
+                case 'DELETE':
+                  return await handleDelete(event, userId);
+                default:
+                  return createErrorResponse(405, 'Method not allowed');
+              }
+            } catch (error) {
+              logger.error('Error in handler:', error);
+              return createErrorResponse(500, 'Internal server error', error);
+            }
+          };
+  ConfigAPILambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Join 
+        - '-'
+        - - !Select [0, !Split ['-', !Ref 'AWS::StackName']]
+          - 'configapilambdarole'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: SSMParameterAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                  - ssm:GetParameters
+                Resource: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/webService-extension2/cognito"
+
+  # Lambda Function for Config API - 改善版
+  ConfigAPIFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Join 
+        - '-'
+        - - !Select [0, !Split ['-', !Ref 'AWS::StackName']]
+          - 'configapifunction'
+      Handler: index.handler
+      Role: !GetAtt ConfigAPILambdaRole.Arn
+      Runtime: nodejs16.x
+      Timeout: 10
+      MemorySize: 128
+      Environment:
+        Variables:
+          USER_POOL_ID: !Ref UserPool
+          CLIENT_ID: !Ref UserPoolClient
+          REGION: !Ref "AWS::Region"
+      Code:
+        ZipFile: |
+          exports.handler = async (event) => {
+            console.log('Event:', JSON.stringify(event, null, 2));
+            
+            // 環境変数から設定を取得
+            const config = {
+              userPoolId: process.env.USER_POOL_ID,
+              clientId: process.env.CLIENT_ID,
+              region: process.env.REGION
+            };
+            
+            console.log('Returning Cognito config:', config);
+            
+            const response = {
+              statusCode: 200,
+              headers: {
+                'Access-Control-Allow-Origin': '*',
+                'Access-Control-Allow-Headers': 'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token',
+                'Access-Control-Allow-Methods': 'GET,OPTIONS',
+                'Content-Type': 'application/json'
+              },
+              body: JSON.stringify(config)
+            };
+            
+            return response;
+          };
+
+  # Lambda Function for Public Config API - 改善版
+  PublicConfigAPIFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Join 
+        - '-'
+        - - !Select [0, !Split ['-', !Ref 'AWS::StackName']]
+          - 'publicconfigapifunction'
+      Handler: index.handler
+      Role: !GetAtt ConfigAPILambdaRole.Arn
+      Runtime: nodejs16.x
+      Timeout: 10
+      MemorySize: 128
+      Environment:
+        Variables:
+          USER_POOL_ID: !Ref UserPool
+          CLIENT_ID: !Ref UserPoolClient
+          REGION: !Ref "AWS::Region"
+      Code:
+        ZipFile: |
+          exports.handler = async (event) => {
+            console.log('Event:', JSON.stringify(event, null, 2));
+            
+            // 環境変数から設定を取得
+            const config = {
+              userPoolId: process.env.USER_POOL_ID,
+              clientId: process.env.CLIENT_ID,
+              region: process.env.REGION
+            };
+            
+            console.log('Returning public Cognito config:', config);
+            
+            const response = {
+              statusCode: 200,
+              headers: {
+                'Access-Control-Allow-Origin': '*',
+                'Access-Control-Allow-Headers': 'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token',
+                'Access-Control-Allow-Methods': 'GET,OPTIONS',
+                'Content-Type': 'application/json'
+              },
+              body: JSON.stringify(config)
+            };
+            
+            return response;
+          };
+  # API Gateway REST API
+  ApiGateway:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: !Join 
+        - '-'
+        - - !Select [0, !Split ['-', !Ref 'AWS::StackName']]
+          - 'api'
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+      BinaryMediaTypes:
+        - '*/*'  # すべてのメディアタイプをサポート
+
+  # API Gateway Authorizer
+  ApiGatewayAuthorizer:
+    Type: AWS::ApiGateway::Authorizer
+    Properties:
+      Name: !Join 
+        - '-'
+        - - !Select [0, !Split ['-', !Ref 'AWS::StackName']]
+          - 'cognitoauthorizer'
+      RestApiId: !Ref ApiGateway
+      Type: COGNITO_USER_POOLS
+      IdentitySource: method.request.header.Authorization
+      ProviderARNs:
+        - !GetAtt UserPool.Arn
+
+  # API Gateway Resources
+  ApiResourceApi:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ParentId: !GetAtt ApiGateway.RootResourceId
+      PathPart: api
+
+  ApiResourceTasks:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ParentId: !Ref ApiResourceApi
+      PathPart: tasks
+
+  ApiResourceTaskId:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ParentId: !Ref ApiResourceTasks
+      PathPart: "{taskId}"
+
+  ApiResourceConfig:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ParentId: !GetAtt ApiGateway.RootResourceId
+      PathPart: config
+
+  ApiResourceCognitoConfig:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ParentId: !GetAtt ApiGateway.RootResourceId
+      PathPart: cognito-config
+
+  ApiResourceCognitoConfigPublic:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ParentId: !GetAtt ApiGateway.RootResourceId
+      PathPart: cognito-config-public
+
+  # API Gateway Methods for Tasks
+  ApiMethodTasksGet:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ResourceId: !Ref ApiResourceTasks
+      HttpMethod: GET
+      AuthorizationType: COGNITO_USER_POOLS
+      AuthorizerId: !Ref ApiGatewayAuthorizer
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${TasksAPIFunction.Arn}/invocations"
+      MethodResponses:
+        - StatusCode: '200'
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: false
+
+  ApiMethodTasksPost:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ResourceId: !Ref ApiResourceTasks
+      HttpMethod: POST
+      AuthorizationType: COGNITO_USER_POOLS
+      AuthorizerId: !Ref ApiGatewayAuthorizer
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${TasksAPIFunction.Arn}/invocations"
+        ContentHandling: CONVERT_TO_TEXT  # バイナリコンテンツをテキストに変換
+      MethodResponses:
+        - StatusCode: '200'
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: false
+
+  ApiMethodTasksOptions:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ResourceId: !Ref ApiResourceTasks
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        IntegrationResponses:
+          - StatusCode: '200'
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+              method.response.header.Access-Control-Allow-Methods: "'GET,POST,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+      MethodResponses:
+        - StatusCode: '200'
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+
+  ApiMethodTaskIdGet:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ResourceId: !Ref ApiResourceTaskId
+      HttpMethod: GET
+      AuthorizationType: COGNITO_USER_POOLS
+      AuthorizerId: !Ref ApiGatewayAuthorizer
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${TasksAPIFunction.Arn}/invocations"
+      MethodResponses:
+        - StatusCode: '200'
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: false
+
+  ApiMethodTaskIdPut:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ResourceId: !Ref ApiResourceTaskId
+      HttpMethod: PUT
+      AuthorizationType: COGNITO_USER_POOLS
+      AuthorizerId: !Ref ApiGatewayAuthorizer
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${TasksAPIFunction.Arn}/invocations"
+        ContentHandling: CONVERT_TO_TEXT  # バイナリコンテンツをテキストに変換
+      MethodResponses:
+        - StatusCode: '200'
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: false
+
+  ApiMethodTaskIdDelete:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ResourceId: !Ref ApiResourceTaskId
+      HttpMethod: DELETE
+      AuthorizationType: COGNITO_USER_POOLS
+      AuthorizerId: !Ref ApiGatewayAuthorizer
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${TasksAPIFunction.Arn}/invocations"
+      MethodResponses:
+        - StatusCode: '200'
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: false
+
+  ApiMethodTaskIdOptions:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ResourceId: !Ref ApiResourceTaskId
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        IntegrationResponses:
+          - StatusCode: '200'
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+              method.response.header.Access-Control-Allow-Methods: "'GET,PUT,DELETE,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+      MethodResponses:
+        - StatusCode: '200'
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+
+  # API Gateway Methods for Config
+  ApiMethodConfigGet:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ResourceId: !Ref ApiResourceConfig
+      HttpMethod: GET
+      AuthorizationType: COGNITO_USER_POOLS
+      AuthorizerId: !Ref ApiGatewayAuthorizer
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ConfigAPIFunction.Arn}/invocations"
+      MethodResponses:
+        - StatusCode: '200'
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: false
+
+  ApiMethodConfigOptions:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ResourceId: !Ref ApiResourceConfig
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        IntegrationResponses:
+          - StatusCode: '200'
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+              method.response.header.Access-Control-Allow-Methods: "'GET,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+      MethodResponses:
+        - StatusCode: '200'
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+
+  ApiMethodCognitoConfigGet:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ResourceId: !Ref ApiResourceCognitoConfig
+      HttpMethod: GET
+      AuthorizationType: COGNITO_USER_POOLS
+      AuthorizerId: !Ref ApiGatewayAuthorizer
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ConfigAPIFunction.Arn}/invocations"
+      MethodResponses:
+        - StatusCode: '200'
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: false
+
+  ApiMethodCognitoConfigOptions:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ResourceId: !Ref ApiResourceCognitoConfig
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        IntegrationResponses:
+          - StatusCode: '200'
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+              method.response.header.Access-Control-Allow-Methods: "'GET,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+      MethodResponses:
+        - StatusCode: '200'
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+
+  ApiMethodCognitoConfigPublicGet:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ResourceId: !Ref ApiResourceCognitoConfigPublic
+      HttpMethod: GET
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${PublicConfigAPIFunction.Arn}/invocations"
+      MethodResponses:
+        - StatusCode: '200'
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: false
+
+  ApiMethodCognitoConfigPublicOptions:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ResourceId: !Ref ApiResourceCognitoConfigPublic
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        IntegrationResponses:
+          - StatusCode: '200'
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+              method.response.header.Access-Control-Allow-Methods: "'GET,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+      MethodResponses:
+        - StatusCode: '200'
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+
+  # API Gateway Deployment
+  ApiGatewayDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn:
+      - ApiMethodTasksGet
+      - ApiMethodTasksPost
+      - ApiMethodTasksOptions
+      - ApiMethodTaskIdGet
+      - ApiMethodTaskIdPut
+      - ApiMethodTaskIdDelete
+      - ApiMethodTaskIdOptions
+      - ApiMethodConfigGet
+      - ApiMethodConfigOptions
+      - ApiMethodCognitoConfigGet
+      - ApiMethodCognitoConfigOptions
+      - ApiMethodCognitoConfigPublicGet
+      - ApiMethodCognitoConfigPublicOptions
+    Properties:
+      RestApiId: !Ref ApiGateway
+      StageName: !Ref Environment
+
+  # Lambda Permissions
+  TasksAPIFunctionPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref TasksAPIFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*"
+
+  ConfigAPIFunctionPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref ConfigAPIFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*"
+
+  PublicConfigAPIFunctionPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref PublicConfigAPIFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*"
+
+  # CloudFront Distribution
+  CloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Origins:
+          - Id: S3Origin
+            DomainName: !GetAtt FrontendBucket.RegionalDomainName
+            S3OriginConfig:
+              OriginAccessIdentity: !Sub "origin-access-identity/cloudfront/${CloudFrontOriginAccessIdentity}"
+          - Id: ApiGatewayOrigin
+            DomainName: !Sub "${ApiGateway}.execute-api.${AWS::Region}.amazonaws.com"
+            OriginPath: !Sub "/${Environment}"
+            CustomOriginConfig:
+              HTTPPort: 80
+              HTTPSPort: 443
+              OriginProtocolPolicy: https-only
+              OriginSSLProtocols:
+                - TLSv1.2
+              OriginReadTimeout: 30
+              OriginKeepaliveTimeout: 5
+        Enabled: true
+        DefaultRootObject: index.html
+        DefaultCacheBehavior:
+          TargetOriginId: S3Origin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods:
+            - HEAD
+            - GET
+            - OPTIONS
+          CachedMethods:
+            - HEAD
+            - GET
+          ForwardedValues:
+            QueryString: false
+            Cookies:
+              Forward: none
+          MinTTL: 0
+          DefaultTTL: 3600  # 1時間にキャッシュ時間を短縮
+          MaxTTL: 86400     # 1日に最大キャッシュ時間を短縮
+        CacheBehaviors:
+          - PathPattern: /api/*
+            TargetOriginId: ApiGatewayOrigin
+            ViewerProtocolPolicy: https-only
+            AllowedMethods:
+              - HEAD
+              - DELETE
+              - POST
+              - GET
+              - OPTIONS
+              - PUT
+              - PATCH
+            CachedMethods:
+              - HEAD
+              - GET
+            ForwardedValues:
+              QueryString: true
+              Cookies:
+                Forward: all
+              Headers:
+                - Authorization
+                - Origin
+                - Access-Control-Request-Method
+                - Access-Control-Request-Headers
+            MinTTL: 0
+            DefaultTTL: 0
+            MaxTTL: 0
+          - PathPattern: /cognito-config*
+            TargetOriginId: ApiGatewayOrigin
+            ViewerProtocolPolicy: https-only
+            AllowedMethods:
+              - HEAD
+              - DELETE
+              - POST
+              - GET
+              - OPTIONS
+              - PUT
+              - PATCH
+            CachedMethods:
+              - HEAD
+              - GET
+            ForwardedValues:
+              QueryString: true
+              Cookies:
+                Forward: all
+              Headers:
+                - Authorization
+                - Origin
+                - Access-Control-Request-Method
+                - Access-Control-Request-Headers
+            MinTTL: 0
+            DefaultTTL: 0
+            MaxTTL: 0
+          - PathPattern: /config
+            TargetOriginId: ApiGatewayOrigin
+            ViewerProtocolPolicy: https-only
+            AllowedMethods:
+              - HEAD
+              - GET
+              - OPTIONS
+            CachedMethods:
+              - HEAD
+              - GET
+            ForwardedValues:
+              QueryString: true
+              Cookies:
+                Forward: all
+              Headers:
+                - Authorization
+                - Origin
+                - Access-Control-Request-Method
+                - Access-Control-Request-Headers
+            MinTTL: 0
+            DefaultTTL: 0
+            MaxTTL: 0
+        PriceClass: PriceClass_100
+        ViewerCertificate:
+          CloudFrontDefaultCertificate: true
+        HttpVersion: http2
+        IPV6Enabled: true
+
+Outputs:
+  CloudFrontDomainName:
+    Description: CloudFront Distribution Domain Name
+    Value: !GetAtt CloudFrontDistribution.DomainName
+
+  ApiGatewayURL:
+    Description: API Gateway URL
+    Value: !Sub "https://${ApiGateway}.execute-api.${AWS::Region}.amazonaws.com/${Environment}"
+
+  S3BucketName:
+    Description: S3 Bucket Name
+    Value: !Ref FrontendBucket
+
+  UserPoolId:
+    Description: Cognito User Pool ID
+    Value: !Ref UserPool
+
+  UserPoolClientId:
+    Description: Cognito User Pool Client ID
+    Value: !Ref UserPoolClient
+
+  DynamoDBTableName:
+    Description: DynamoDB Table Name
+    Value: !Ref TasksTable

@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>タスク管理アプリ</title>
+  
+  <!-- セキュリティ関連のメタタグ -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://unpkg.com https://sdk.amazonaws.com https://cdn.jsdelivr.net 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://*.cloudfront.net https://*.amazonaws.com https://*.execute-api.*.amazonaws.com">
+  <meta http-equiv="X-XSS-Protection" content="1; mode=block">
+  <meta http-equiv="X-Content-Type-Options" content="nosniff">
+  <meta http-equiv="X-Frame-Options" content="DENY">
+  <meta name="referrer" content="no-referrer">
+  
+  <link rel="stylesheet" href="styles.css">
+  <!-- デバッグ用スクリプト -->
+  <script>
+    // デバッグログを表示するための関数
+    window.debugLog = function(message) {
+      console.log(message);
+      const debugElement = document.getElementById('debug-log');
+      if (debugElement) {
+        const logItem = document.createElement('div');
+        logItem.textContent = new Date().toISOString().substring(11, 19) + ': ' + message;
+        debugElement.appendChild(logItem);
+        debugElement.scrollTop = debugElement.scrollHeight;
+      }
+    };
+    
+    // グローバルエラーハンドラー
+    window.addEventListener('error', function(event) {
+      console.error('Global error:', event.message, event.filename, event.lineno);
+      debugLog('ERROR: ' + event.message + ' at ' + event.filename + ':' + event.lineno);
+      return false;
+    });
+    
+    console.log('ページ読み込み開始');
+  </script>
+</head>
+<body>
+  <div id="root"></div>
+  
+  <!-- デバッグログ表示エリア (初期状態では非表示) -->
+  <div id="debug-log" style="display: none; position: fixed; bottom: 0; left: 0; right: 0; height: 200px; overflow: auto; background: rgba(0,0,0,0.8); color: #00ff00; border-top: 1px solid #333; padding: 10px; font-family: monospace; font-size: 12px; z-index: 9999;"></div>
+  
+  <!-- デバッグ表示切替ボタン -->
+  <button id="toggle-debug" style="position: fixed; bottom: 10px; right: 10px; z-index: 10000; opacity: 0.7;">デバッグ表示</button>
+  
+  <script>
+    // デバッグ表示の切り替え
+    document.getElementById('toggle-debug').addEventListener('click', function() {
+      const debugElement = document.getElementById('debug-log');
+      if (debugElement.style.display === 'none') {
+        debugElement.style.display = 'block';
+        this.textContent = 'デバッグ非表示';
+      } else {
+        debugElement.style.display = 'none';
+        this.textContent = 'デバッグ表示';
+      }
+    });
+    
+    // CSRF対策: ランダムなトークンを生成
+    const csrfToken = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
+    document.cookie = `XSRF-TOKEN=${csrfToken}; path=/; SameSite=Strict; Secure`;
+    
+    console.log('外部ライブラリ読み込み開始');
+  </script>
+  
+  <!-- 外部ライブラリ - インテグリティチェックを削除して単純化 -->
+  <script src="https://unpkg.com/react@17/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@17/umd/react-dom.production.min.js"></script>
+  <script src="https://sdk.amazonaws.com/js/aws-sdk-2.1001.0.min.js"></script>
+  <script src="https://unpkg.com/amazon-cognito-identity-js@5.2.10/dist/amazon-cognito-identity.min.js"></script>
+  <script src="https://unpkg.com/babel-standalone@6/babel.min.js"></script>
+  
+  <!-- アプリケーションスクリプト -->
+  <script src="auth-secure.js"></script>
+  <script src="api-secure.js"></script>
+  <script src="app.js" type="text/babel"></script>
+  
+  <!-- スクリプト読み込み確認 -->
+  <script>
+    // すべてのスクリプトが読み込まれたことを確認
+    console.log('すべてのスクリプトが読み込まれました');
+    console.log('React:', typeof React !== 'undefined' ? 'loaded' : 'not loaded');
+    console.log('ReactDOM:', typeof ReactDOM !== 'undefined' ? 'loaded' : 'not loaded');
+    console.log('AWS:', typeof AWS !== 'undefined' ? 'loaded' : 'not loaded');
+    console.log('AmazonCognitoIdentity:', typeof AmazonCognitoIdentity !== 'undefined' ? 'loaded' : 'not loaded');
+    console.log('Babel:', typeof Babel !== 'undefined' ? 'loaded' : 'not loaded');
+    console.log('Auth:', typeof Auth !== 'undefined' ? 'loaded' : 'not loaded');
+    console.log('API:', typeof API !== 'undefined' ? 'loaded' : 'not loaded');
+  </script>
+</body>
+</html>
