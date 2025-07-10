@@ -43,20 +43,20 @@
   - function.zip
 　- testweb-cloudformation.yaml
 
-### 使い方
-　　1. testweb-cloudformation.yaml を使いCloudformationにてスタックを作成します
+#### 使い方
+1. testweb-cloudformation.yaml を使いCloudformationにてスタックを作成します
   
-　　2. testweb-cloudformation.yaml で作成された Lambdaを、function.zip で更新します
+2. testweb-cloudformation.yaml で作成された Lambdaを、function.zip で更新します
     更新の仕方は、function.zip をs3に配置し、Lambdaページを開き、コードソースタブの右上「アップロード元」からS3を選択、
     配置したfunction.zip のURLを貼り付け、保存ボタンを押下してください。
-  
-    3. testweb-cloudformation.yaml の出力より、CloudfrontのURLを確認し、
-    api-secure.js、auth-secure.jsの「https://xxxxxxxxxx.cloudfront.net」部分を置き換えてください。
-    
-    4. testweb-cloudformation.yaml で作成されたS3に、api-secure.js、app.js、auth-secure.js、index.html、styles.css を
+
+3. testweb-cloudformation.yaml の出力より、CloudfrontのURLを確認し、
+　　api-secure.js、auth-secure.jsの「https://xxxxxxxxxx.cloudfront.net」部分を置き換えてください。
+
+4. testweb-cloudformation.yaml で作成されたS3に、api-secure.js、app.js、auth-secure.js、index.html、styles.css を
     配置します
     
-    5. CloudfrontのURLをブラウザからアクセスします。アプリケーションが呼び出せます！
+5. CloudfrontのURLをブラウザからアクセスします。アプリケーションが呼び出せます！
 
    こちらはAmazonQ Developerの指摘を元にセキュリティ対応を行っておりますが、脆弱性診断は受けておりませんので、
    ご留意ください。
