@@ -34,6 +34,14 @@
 
 ### セキュリティ対応用資材(準備中)
 
+　- api-secure.js # 置換場所あり
+  - app.js
+  - auth-secure.js # 置換場所あり
+  - index.html
+  - styles.css
+  - function.zip
+　- testweb-cloudformation.yaml
+
 
 ## 正誤表
 
