@@ -43,6 +43,7 @@
   - function.zip
 　- testweb-cloudformation.yaml
 
+
 #### 使い方
 1. testweb-cloudformation.yaml を使いCloudformationにてスタックを作成します
   
@@ -68,7 +69,9 @@
 ## 更新サマリ
 
 2024/8/12 1.0
+
 2025/5/30 1.99 (セキュリティ資材Up少々お待ちください)
+
 2025/7/11 2.0  (セキュリティ資材Up完了)
 
 # 連絡先
